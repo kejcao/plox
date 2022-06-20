@@ -56,7 +56,11 @@ define_ast('Expr', {
 })
 
 define_ast('Stmt', {
+    'Block': ['statements'],
     'Expression': ['expression'],
+    'If': ['condition', 'then_branch', 'else_branch'],
     'Print': ['expression'],
-    'Var': ['name', 'initializer']
+    'Var': ['name', 'initializer'],
+    'While': ['condition', 'body'],
+    'Break': ['keyword']
 })

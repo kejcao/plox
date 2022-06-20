@@ -9,6 +9,11 @@ from enum import Enum
 from expr import *
 from stmt import *
 
+class LoxBreak(Exception):
+    def __init__(self, token):
+        self.token = token
+        super().__init__('nothing to break out of.')
+
 class LoxParseError(Exception):
     pass
 
@@ -30,10 +35,10 @@ class TokenType(Enum):
     IDENTIFIER, STRING, NUMBER,
 
     AND, CLASS, ELSE, FALSE, FUN, FOR, IF, NIL, OR,
-    PRINT, RETURN, SUPER, THIS, TRUE, VAR, WHILE,
+    PRINT, RETURN, SUPER, THIS, TRUE, VAR, WHILE, BREAK,
 
     EOF
-    ) = range(39)
+    ) = range(40)
 
 class Token:
     def __init__(self, type_, lexeme, literal, line):
@@ -60,6 +65,7 @@ class Lexer:
         'true': TokenType.TRUE,
         'var': TokenType.VAR,
         'while': TokenType.WHILE,
+        'break': TokenType.BREAK
     }
 
     def __init__(self, src):
@@ -191,7 +197,7 @@ class Parser:
         return stmts
 
     def expression(self):
-        return self.equality()
+        return self.assignment()
 
     def declaration(self):
         try:
@@ -200,12 +206,67 @@ class Parser:
             return self.statement()
         except LoxParseError:
             self.synchronize()
-            return None
 
     def statement(self):
-        if self.next(TokenType.PRINT):
-            return self.print_statement()
+        keywords = [
+            (TokenType.FOR, self.for_statement),
+            (TokenType.IF, self.if_statement),
+            (TokenType.PRINT, self.print_statement),
+            (TokenType.WHILE, self.while_statement),
+            (TokenType.BREAK, self.break_statement)
+        ]
+
+        for token, consume in keywords:
+            if self.next(token):
+                return consume()
+
+        if self.next(TokenType.LEFT_BRACE):
+            return Block(self.block())
+
         return self.expression_statement()
+
+    def for_statement(self):
+        self.consume(TokenType.LEFT_PAREN, 'expect "(" after "for".')
+        if self.next(TokenType.SEMICOLON):
+            initializer = None
+        elif self.next(TokenType.VAR):
+            initializer = self.var_declaration()
+        else:
+            initializer = self.expression_statement()
+
+        condition = Literal(True)
+        if not self.check(TokenType.SEMICOLON):
+            condition = self.expression()
+        self.consume(TokenType.SEMICOLON, 'expect ";" after loop condition.')
+
+        increment = None
+        if not self.check(TokenType.RIGHT_PAREN):
+            increment = self.expression()
+        self.consume(TokenType.RIGHT_PAREN, 'expect ")" after for clauses.')
+
+        body = self.statement()
+
+        if increment is not None:
+            body = Block([body, Expression(increment)])
+
+        body = While(condition, body)
+
+        if initializer is not None:
+            body = Block([initializer, body])
+
+        return body
+
+    def if_statement(self):
+        self.consume(TokenType.LEFT_PAREN, 'expect "(" after "if".')
+        condition = self.expression()
+        self.consume(TokenType.RIGHT_PAREN, 'expect ")" after if condition.')
+
+        then_branch = self.statement()
+        else_branch = None
+        if self.next(TokenType.ELSE):
+            else_branch = self.statement()
+
+        return If(condition, then_branch, else_branch)
 
     def print_statement(self):
         value = self.expression()
@@ -222,10 +283,47 @@ class Parser:
         self.consume(TokenType.SEMICOLON, 'expect ";" after variable declaration.')
         return Var(name, initializer)
 
+    def while_statement(self):
+        self.consume(TokenType.LEFT_PAREN, 'expect "(" after "while".')
+        condition = self.expression()
+        self.consume(TokenType.RIGHT_PAREN, 'expect ")" after condition.')
+        return While(condition, self.statement())
+
+    def break_statement(self):
+        self.consume(TokenType.SEMICOLON, 'expect ";" after break.')
+        return Break(self.previous())
+
     def expression_statement(self):
         expr = self.expression()
         self.consume(TokenType.SEMICOLON, 'expect ";" after expression.')
         return Expression(expr)
+
+    def block(self):
+        statements = []
+        while not self.check(TokenType.RIGHT_BRACE) and not self.at_end():
+            statements.append(self.declaration())
+        self.consume(TokenType.RIGHT_BRACE, 'expect "}" after block.')
+        return statements
+
+    def assignment(self):
+        expr = self.logical_or()
+        if self.next(TokenType.EQUAL):
+            if isinstance(expr, Variable):
+                return Assign(expr.name, self.assignment())
+            self.error(self.previous(), 'invalid assignment target.')
+        return expr
+
+    def logical_or(self):
+        expr = self.logical_and()
+        while self.next(TokenType.OR):
+            expr = Logical(expr, self.previous(), self.logical_and())
+        return expr
+
+    def logical_and(self):
+        expr = self.equality()
+        while self.next(TokenType.AND):
+            expr = Logical(expr, self.previous(), self.equality())
+        return expr
 
     def equality(self):
         expr = self.comparison()
@@ -338,15 +436,31 @@ class Parser:
             self.advance()
 
 class Environment:
-    def __init__(self):
+    def __init__(self, enclosing=None):
         self.values = {}
+        self.enclosing = enclosing
 
-    def define(self, name, val):
-        self.values[name] = val
+    def define(self, name, value):
+        self.values[name] = value
+
+    def assign(self, name, value):
+        if name.lexeme in self.values:
+            self.values[name.lexeme] = value
+            return
+
+        if self.enclosing is not None:
+            self.enclosing.assign(name, value)
+            return
+
+        raise LoxRuntimeError(name, f'undefined variable "{name.lexeme}".')
 
     def get(self, name):
         if name.lexeme in self.values:
             return self.values[name.lexeme]
+
+        if self.enclosing is not None:
+            return self.enclosing.get(name)
+
         raise LoxRuntimeError(name, f'undefined variable "{name.lexeme}".')
 
 class Interpreter(ExprVisitor, StmtVisitor):
@@ -357,11 +471,13 @@ class Interpreter(ExprVisitor, StmtVisitor):
         try:
             for stmt in stmts:
                 self.execute(stmt)
-        except LoxRuntimeError as e:
+        except (LoxRuntimeError, LoxBreak) as e:
             Lox.runtime_error(e)
 
     def visit_assign_expr(self, expr):
-        pass
+        value = self.evaluate(expr.value)
+        self.environment.assign(expr.name, value)
+        return value
 
     def visit_binary_expr(self, expr):
         left = self.evaluate(expr.left)
@@ -399,7 +515,6 @@ class Interpreter(ExprVisitor, StmtVisitor):
             case TokenType.STAR:
                 self.check_num_operands(expr.operator, left, right)
                 return left * right
-        return None
 
     def visit_call_expr(self, expr):
         pass
@@ -414,7 +529,14 @@ class Interpreter(ExprVisitor, StmtVisitor):
         return expr.value
 
     def visit_logical_expr(self, expr):
-        pass
+        left = self.evaluate(expr.left)
+        if expr.operator.type == TokenType.OR:
+            if self.is_truthy(left):
+                return left
+        else:
+            if not self.is_truthy(left):
+                return left
+        return self.evaluate(expr.right)
 
     def visit_set_expr(self, expr):
         pass
@@ -433,7 +555,6 @@ class Interpreter(ExprVisitor, StmtVisitor):
             case TokenType.MINUS:
                 self.check_num_operand(expr.operator, right)
                 return -right
-        return None
 
     def visit_variable_expr(self, expr):
         return self.environment.get(expr.name)
@@ -467,18 +588,45 @@ class Interpreter(ExprVisitor, StmtVisitor):
     def execute(self, stmt):
         stmt.accept(self)
 
+    def visit_block_stmt(self, stmt):
+        self.execute_block(stmt.statements, Environment(self.environment))
+
+    def execute_block(self, stmts, env):
+        parent = self.environment
+        try:
+            self.environment = env
+            for stmt in stmts:
+                self.execute(stmt)
+        finally:
+            self.environment = parent
+
     def visit_expression_stmt(self, stmt):
         self.evaluate(stmt.expression)
+
+    def visit_if_stmt(self, stmt):
+        if self.is_truthy(self.evaluate(stmt.condition)):
+            self.execute(stmt.then_branch)
+        elif stmt.else_branch is not None:
+            self.execute(stmt.else_branch)
 
     def visit_print_stmt(self, stmt):
         print(self.stringify(self.evaluate(stmt.expression)))
 
     def visit_var_stmt(self, stmt):
-        val = None
+        value = None
         if stmt.initializer is not None:
-            val = self.evaluate(stmt.initializer)
-        self.environment.define(stmt.name.lexeme, val)
-        return None
+            value = self.evaluate(stmt.initializer)
+        self.environment.define(stmt.name.lexeme, value)
+
+    def visit_while_stmt(self, stmt):
+        while self.is_truthy(self.evaluate(stmt.condition)):
+            try:
+                self.execute(stmt.body)
+            except LoxBreak:
+                break
+
+    def visit_break_stmt(self, stmt):
+        raise LoxBreak(stmt.keyword)
 
 class Lox:
     interpreter = Interpreter()
