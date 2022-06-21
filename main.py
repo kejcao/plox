@@ -635,18 +635,18 @@ class Lox:
 
     @staticmethod
     def error(line, msg):
-        print(f'lox: line {line}: {msg}')
+        print(f'lox: line {line}: {msg}', file=sys.stderr)
         Lox.had_error = True
 
     @staticmethod
     def token_error(token, msg):
         where = 'end' if token.type_ == TokenType.EOF else token.lexeme
-        print(f'lox: line {token.line}, at {where}: {msg}')
+        print(f'lox: line {token.line}, at {where}: {msg}', file=sys.stderr)
         Lox.had_error = True
 
     @staticmethod
     def runtime_error(error):
-        print(f'lox: line {error.token.line}: {error}')
+        print(f'lox: line {error.token.line}: {error}', file=sys.stderr)
         Lox.had_runtime_error = True
 
     @staticmethod
