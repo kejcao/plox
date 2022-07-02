@@ -1,4 +1,6 @@
+from abc import ABC, abstractmethod
 import sys
+import time
 
 try:
     import readline
@@ -9,36 +11,48 @@ from enum import Enum
 from expr import *
 from stmt import *
 
-class LoxBreak(Exception):
+class LoxParseError(Exception):
+    pass
+
+class LoxReturn(RuntimeError):
+    def __init__(self, value, token):
+        self.value = value
+        self.token = token
+        super().__init__('nothing to return out of.')
+
+class LoxBreak(RuntimeError):
     def __init__(self, token):
         self.token = token
         super().__init__('nothing to break out of.')
 
-class LoxParseError(Exception):
-    pass
+class LoxContinue(RuntimeError):
+    def __init__(self, token):
+        self.token = token
+        super().__init__('nothing to continue out of.')
 
 class LoxRuntimeError(RuntimeError):
     def __init__(self, token, msg):
         self.token = token
         super().__init__(msg)
 
-class TokenType(Enum):
-    (
-    LEFT_PAREN, RIGHT_PAREN, LEFT_BRACE, RIGHT_BRACE,
-    COMMA, DOT, MINUS, PLUS, SEMICOLON, SLASH, STAR,
+TokenType = Enum('TokenType',
+'''
+    LEFT_PAREN RIGHT_PAREN LEFT_BRACE RIGHT_BRACE
+    COMMA DOT MINUS PLUS SEMICOLON SLASH STAR
 
-    BANG, BANG_EQUAL,
-    EQUAL, EQUAL_EQUAL,
-    GREATER, GREATER_EQUAL,
-    LESS, LESS_EQUAL,
+    BANG BANG_EQUAL
+    EQUAL EQUAL_EQUAL
+    GREATER GREATER_EQUAL
+    LESS LESS_EQUAL
 
-    IDENTIFIER, STRING, NUMBER,
+    IDENTIFIER STRING NUMBER
 
-    AND, CLASS, ELSE, FALSE, FUN, FOR, IF, NIL, OR,
-    PRINT, RETURN, SUPER, THIS, TRUE, VAR, WHILE, BREAK,
+    AND CLASS ELSE FALSE FUN FOR IF NIL OR RETURN
+    SUPER THIS TRUE VAR WHILE BREAK CONTINUE
 
     EOF
-    ) = range(40)
+'''
+)
 
 class Token:
     def __init__(self, type_, lexeme, literal, line):
@@ -48,7 +62,7 @@ class Token:
         self.line = line
 
 class Lexer:
-    keywords = {
+    KEYWORDS = {
         'and': TokenType.AND,
         'class': TokenType.CLASS,
         'else': TokenType.ELSE,
@@ -58,14 +72,14 @@ class Lexer:
         'if': TokenType.IF,
         'nil': TokenType.NIL,
         'or': TokenType.OR,
-        'print': TokenType.PRINT,
         'return': TokenType.RETURN,
         'super': TokenType.SUPER,
         'this': TokenType.THIS,
         'true': TokenType.TRUE,
         'var': TokenType.VAR,
         'while': TokenType.WHILE,
-        'break': TokenType.BREAK
+        'break': TokenType.BREAK,
+        'continue': TokenType.CONTINUE
     }
 
     def __init__(self, src):
@@ -136,7 +150,7 @@ class Lexer:
     def consume_identifier(self):
         while self.is_alpha_numeric(self.peek()):
             self.advance()
-        self.add_token(self.keywords.get(self.src[self.start:self.current], TokenType.IDENTIFIER))
+        self.add_token(self.KEYWORDS.get(self.src[self.start:self.current], TokenType.IDENTIFIER))
 
     def lex_token(self):
         match self.advance():
@@ -197,10 +211,14 @@ class Parser:
         return stmts
 
     def expression(self):
+        if self.next(TokenType.FUN):
+            return self.function('anonymous function')
         return self.assignment()
 
     def declaration(self):
         try:
+            if self.next(TokenType.FUN):
+                return self.function('function')
             if self.next(TokenType.VAR):
                 return self.var_declaration()
             return self.statement()
@@ -208,15 +226,14 @@ class Parser:
             self.synchronize()
 
     def statement(self):
-        keywords = [
+        for token, consume in (
             (TokenType.FOR, self.for_statement),
             (TokenType.IF, self.if_statement),
-            (TokenType.PRINT, self.print_statement),
             (TokenType.WHILE, self.while_statement),
-            (TokenType.BREAK, self.break_statement)
-        ]
-
-        for token, consume in keywords:
+            (TokenType.BREAK, self.break_statement),
+            (TokenType.CONTINUE, self.continue_statement),
+            (TokenType.RETURN, self.return_statement)
+        ):
             if self.next(token):
                 return consume()
 
@@ -268,10 +285,21 @@ class Parser:
 
         return If(condition, then_branch, else_branch)
 
-    def print_statement(self):
-        value = self.expression()
-        self.consume(TokenType.SEMICOLON, 'expect ";" after value.')
-        return Print(value)
+    def return_statement(self):
+        keyword = self.previous()
+        value = None
+        if not self.check(TokenType.SEMICOLON):
+            value = self.expression()
+        self.consume(TokenType.SEMICOLON, 'expect ";" after return value.')
+        return Return(keyword, value)
+
+    def break_statement(self):
+        self.consume(TokenType.SEMICOLON, 'expect ";" after break.')
+        return Break(self.previous())
+
+    def continue_statement(self):
+        self.consume(TokenType.SEMICOLON, 'expect ";" after continue.')
+        return Continue(self.previous())
 
     def var_declaration(self):
         name = self.consume(TokenType.IDENTIFIER, 'expect variable name.')
@@ -289,14 +317,27 @@ class Parser:
         self.consume(TokenType.RIGHT_PAREN, 'expect ")" after condition.')
         return While(condition, self.statement())
 
-    def break_statement(self):
-        self.consume(TokenType.SEMICOLON, 'expect ";" after break.')
-        return Break(self.previous())
-
     def expression_statement(self):
         expr = self.expression()
         self.consume(TokenType.SEMICOLON, 'expect ";" after expression.')
         return Expression(expr)
+
+    def function(self, kind):
+        name = None
+        if kind != 'anonymous function':
+            name = self.consume(TokenType.IDENTIFIER, f'expect {kind} name.')
+        self.consume(TokenType.LEFT_PAREN, f'expect "(" after {kind} name.')
+        params = []
+        if not self.check(TokenType.RIGHT_PAREN):
+            while True:
+                if len(params) >= 255:
+                    self.error(self.peek(), 'cannot have more than 255 parameters.')
+                params.append(self.consume(TokenType.IDENTIFIER, 'expect parameter name.'))
+                if not self.next(TokenType.COMMA):
+                    break
+        self.consume(TokenType.RIGHT_PAREN, 'expect ")" after parameters.')
+        self.consume(TokenType.LEFT_BRACE, f'expect "{{" before {kind} body.')
+        return Function(name, params, self.block())
 
     def block(self):
         statements = []
@@ -357,7 +398,28 @@ class Parser:
     def unary(self):
         if self.next(TokenType.BANG, TokenType.MINUS):
             return Unary(self.previous(), self.unary())
-        return self.primary()
+        return self.call()
+
+    def finish_call(self, callee):
+        args = []
+        if not self.check(TokenType.RIGHT_PAREN):
+            while True:
+                if len(args) >= 255:
+                    self.error(self.peek(), 'cannot have more than 255 arguments.')
+                args.append(self.expression())
+                if not self.next(TokenType.COMMA):
+                    break
+        paren = self.consume(TokenType.RIGHT_PAREN, 'expect ")" after arguments.')
+        return Call(callee, paren, args)
+
+    def call(self):
+        expr = self.primary()
+        while True:
+            if self.next(TokenType.LEFT_PAREN):
+                expr = self.finish_call(expr)
+            else:
+                break
+        return expr
 
     def primary(self):
         if self.next(TokenType.FALSE):
@@ -428,7 +490,8 @@ class Parser:
                     TokenType.FOR|
                     TokenType.IF|
                     TokenType.WHILE|
-                    TokenType.PRINT|
+                    TokenType.CONTINUE|
+                    TokenType.BREAK|
                     TokenType.RETURN
                 ):
                     return
@@ -440,8 +503,9 @@ class Environment:
         self.values = {}
         self.enclosing = enclosing
 
-    def define(self, name, value):
-        self.values[name] = value
+    def define(self, *args):
+        for arg in args:
+            self.values[arg[0]] = arg[1]
 
     def assign(self, name, value):
         if name.lexeme in self.values:
@@ -463,15 +527,95 @@ class Environment:
 
         raise LoxRuntimeError(name, f'undefined variable "{name.lexeme}".')
 
+class Callable(ABC):
+    @abstractmethod
+    def arity(self):
+        pass
+
+    @abstractmethod
+    def call(self, interpreter, args):
+        pass
+
+class LoxFunction(Callable):
+    def __init__(self, decl, closure):
+        self.closure = closure
+        self.decl = decl
+
+    def arity(self):
+        return len(self.decl.params)
+
+    def call(self, interpreter, args):
+        env = Environment(self.closure)
+        for param, arg in zip(self.decl.params, args):
+            env.define((param.lexeme, arg))
+
+        try:
+            interpreter.execute_block(self.decl.body, env)
+        except LoxReturn as ret:
+            return ret.value
+
+    def __str__(self):
+        return f'<fn {self.decl.name.lexeme}>'
+
+class NativeFunc(Callable):
+    def __str__(self):
+        return '<native fn>'
+
+class Clock(NativeFunc):
+    def arity(self): return 0
+    def call(self, interpreter, args):
+        return time.time()
+
+class Print(NativeFunc):
+    def arity(self): return 1
+    def call(self, interpreter, args):
+        if isinstance(args[0], float):
+            if args[0].is_integer():
+                print(int(args[0]), end='')
+            else:
+                print(f'{args[0]:f}', end='')
+        else:
+            print(args[0], end='')
+
+class PrintLn(NativeFunc):
+    def arity(self): return 1
+    def call(self, interpreter, args):
+        if isinstance(args[0], float):
+            if args[0].is_integer():
+                print(int(args[0]))
+            else:
+                print(f'{args[0]:f}')
+        else:
+            print(args[0])
+
+class GetLine(NativeFunc):
+    def arity(self): return 1
+    def call(self, interpreter, args):
+        return input(args[0])
+
+class Quit(NativeFunc):
+    def arity(self): return 0
+    def call(self, interpreter, args):
+        sys.exit(0)
+
 class Interpreter(ExprVisitor, StmtVisitor):
     def __init__(self):
-        self.environment = Environment()
+        self.globals = Environment()
+        self.environment = self.globals
+
+        self.globals.define(
+            ('clock', Clock()),
+            ('print', Print()),
+            ('println', PrintLn()),
+            ('getline', GetLine()),
+            ('quit', Quit())
+        )
 
     def interpret(self, stmts):
         try:
             for stmt in stmts:
                 self.execute(stmt)
-        except (LoxRuntimeError, LoxBreak) as e:
+        except (LoxRuntimeError, LoxBreak, LoxContinue, LoxReturn) as e:
             Lox.runtime_error(e)
 
     def visit_assign_expr(self, expr):
@@ -504,8 +648,10 @@ class Interpreter(ExprVisitor, StmtVisitor):
                 self.check_num_operands(expr.operator, left, right)
                 return left - right
             case TokenType.PLUS:
-                if not isinstance(left, (float, str)) or not isinstance(right, type(left)):
-                    raise LoxRuntimeError(expr.operator, 'operands must be numbers or strings.')
+                if (not isinstance(left, (float, str))
+                 or not isinstance(right, type(left))):
+                    raise LoxRuntimeError(expr.operator,
+                        'operands must be numbers or strings.')
                 return left + right
             case TokenType.SLASH:
                 self.check_num_operands(expr.operator, left, right)
@@ -517,7 +663,19 @@ class Interpreter(ExprVisitor, StmtVisitor):
                 return left * right
 
     def visit_call_expr(self, expr):
-        pass
+        callee = self.evaluate(expr.callee)
+
+        if not isinstance(callee, Callable):
+            raise LoxRuntimeError(expr.paren,
+                'can only call functions and classes.')
+
+        args = [self.evaluate(arg) for arg in expr.arguments]
+
+        if len(args) != callee.arity():
+            raise LoxRuntimeError(expr.paren,
+                f'expected {callee.arity()} arguments, but got {len(args)}.')
+
+        return callee.call(self, args)
 
     def visit_get_expr(self, expr):
         pass
@@ -575,13 +733,6 @@ class Interpreter(ExprVisitor, StmtVisitor):
     def is_equal(self, a, b):
         return a == b
 
-    def stringify(self, obj):
-        if obj is None:
-            return 'nil'
-        if isinstance(obj, float):
-            return str(int(obj) if obj.is_integer() else obj)
-        return str(obj)
-
     def evaluate(self, expr):
         return expr.accept(self)
 
@@ -603,20 +754,39 @@ class Interpreter(ExprVisitor, StmtVisitor):
     def visit_expression_stmt(self, stmt):
         self.evaluate(stmt.expression)
 
+    def visit_function_stmt(self, stmt):
+        if stmt.name is None:
+            return LoxFunction(stmt, self.environment)
+        else:
+            self.environment.define((
+                stmt.name.lexeme,
+                LoxFunction(stmt, self.environment)
+            ))
+
     def visit_if_stmt(self, stmt):
         if self.is_truthy(self.evaluate(stmt.condition)):
             self.execute(stmt.then_branch)
         elif stmt.else_branch is not None:
             self.execute(stmt.else_branch)
 
-    def visit_print_stmt(self, stmt):
-        print(self.stringify(self.evaluate(stmt.expression)))
+    def visit_return_stmt(self, stmt):
+        raise LoxReturn(stmt.value
+            if stmt.value is None
+            else self.evaluate(stmt.value),
+            stmt.keyword
+        )
+
+    def visit_break_stmt(self, stmt):
+        raise LoxBreak(stmt.keyword)
+
+    def visit_continue_stmt(self, stmt):
+        raise LoxContinue(stmt.keyword)
 
     def visit_var_stmt(self, stmt):
         value = None
         if stmt.initializer is not None:
             value = self.evaluate(stmt.initializer)
-        self.environment.define(stmt.name.lexeme, value)
+        self.environment.define((stmt.name.lexeme, value))
 
     def visit_while_stmt(self, stmt):
         while self.is_truthy(self.evaluate(stmt.condition)):
@@ -624,9 +794,8 @@ class Interpreter(ExprVisitor, StmtVisitor):
                 self.execute(stmt.body)
             except LoxBreak:
                 break
-
-    def visit_break_stmt(self, stmt):
-        raise LoxBreak(stmt.keyword)
+            except LoxContinue:
+                continue
 
 class Lox:
     interpreter = Interpreter()
@@ -635,18 +804,18 @@ class Lox:
 
     @staticmethod
     def error(line, msg):
-        print(f'lox: line {line}: {msg}', file=sys.stderr)
+        print(f'plox: line {line}: {msg}', file=sys.stderr)
         Lox.had_error = True
 
     @staticmethod
     def token_error(token, msg):
         where = 'end' if token.type_ == TokenType.EOF else token.lexeme
-        print(f'lox: line {token.line}, at {where}: {msg}', file=sys.stderr)
+        print(f'plox: line {token.line}, at {where}: {msg}', file=sys.stderr)
         Lox.had_error = True
 
     @staticmethod
     def runtime_error(error):
-        print(f'lox: line {error.token.line}: {error}', file=sys.stderr)
+        print(f'plox: line {error.token.line}: {error}', file=sys.stderr)
         Lox.had_runtime_error = True
 
     @staticmethod

@@ -17,11 +17,15 @@ class StmtVisitor(ABC):
         pass
 
     @abstractmethod
+    def visit_function_stmt(self, stmt):
+        pass
+
+    @abstractmethod
     def visit_if_stmt(self, stmt):
         pass
 
     @abstractmethod
-    def visit_print_stmt(self, stmt):
+    def visit_return_stmt(self, stmt):
         pass
 
     @abstractmethod
@@ -34,6 +38,10 @@ class StmtVisitor(ABC):
 
     @abstractmethod
     def visit_break_stmt(self, stmt):
+        pass
+
+    @abstractmethod
+    def visit_continue_stmt(self, stmt):
         pass
 
 class Block(Stmt):
@@ -50,6 +58,15 @@ class Expression(Stmt):
     def accept(self, visitor):
         return visitor.visit_expression_stmt(self)
 
+class Function(Stmt):
+    def __init__(self, name, params, body):
+        self.name = name
+        self.params = params
+        self.body = body
+
+    def accept(self, visitor):
+        return visitor.visit_function_stmt(self)
+
 class If(Stmt):
     def __init__(self, condition, then_branch, else_branch):
         self.condition = condition
@@ -59,12 +76,13 @@ class If(Stmt):
     def accept(self, visitor):
         return visitor.visit_if_stmt(self)
 
-class Print(Stmt):
-    def __init__(self, expression):
-        self.expression = expression
+class Return(Stmt):
+    def __init__(self, keyword, value):
+        self.keyword = keyword
+        self.value = value
 
     def accept(self, visitor):
-        return visitor.visit_print_stmt(self)
+        return visitor.visit_return_stmt(self)
 
 class Var(Stmt):
     def __init__(self, name, initializer):
@@ -88,3 +106,10 @@ class Break(Stmt):
 
     def accept(self, visitor):
         return visitor.visit_break_stmt(self)
+
+class Continue(Stmt):
+    def __init__(self, keyword):
+        self.keyword = keyword
+
+    def accept(self, visitor):
+        return visitor.visit_continue_stmt(self)
